@@ -1,0 +1,147 @@
+pipeline {
+    agent any
+
+    environment {
+        imageName = "your-image name"
+        registryCredentials = "nexus-credentials-placeholder"
+        registry = "registry-url-placeholder"
+        dockerImage = ''
+        version = ":latest"
+        emailRecipients = "email-recipient-placeholder"
+        emailSender = "email-sender-placeholder"
+    }
+
+    stages {
+        stage('codefetch') {
+            steps {
+                git branch: 'feature-branch-placeholder', credentialsId: 'git-credentials-placeholder', url: 'git-repo-url-placeholder'
+            }
+        }
+
+        stage('Building image') {
+            steps {
+                script {
+                    try {
+                        dockerImage = docker.build(imageName)
+                    } catch (Exception e) {
+                        sendBuildFailureEmail("Building image", e.getMessage())
+                        currentBuild.result = 'FAILURE'
+                        return
+                    }
+                }
+            }
+        }
+
+        stage('Uploading to Nexus') {
+            steps {
+                script {
+                    try {
+                        docker.withRegistry('http://' + registry, registryCredentials) {
+                            dockerImage.push('latest')
+                        }
+                    } catch (Exception e) {
+                        sendBuildFailureEmail("Uploading to Nexus", e.getMessage())
+                        currentBuild.result = 'FAILURE'
+                        return
+                    }
+                }
+            }
+        }
+
+        stage('Stop previous containers') {
+            steps {
+                script {
+                    try {
+                        sh "ssh user@host-ip-placeholder 'docker ps -f name=socketgateway -q | xargs --no-run-if-empty docker container stop'"
+                    } catch (Exception e) {
+                        sendBuildFailureEmail("Stop previous containers", e.getMessage())
+                        currentBuild.result = 'FAILURE'
+                        return
+                    }
+                }
+            }
+        }
+
+        stage('Remove older containers') {
+            steps {
+                script {
+                    try {
+                        sh "ssh user@host-ip-placeholder 'docker container ls -a -f name=socketgateway -q | xargs -r docker container rm'"
+                    } catch (Exception e) {
+                        sendBuildFailureEmail("Remove older containers", e.getMessage())
+                        currentBuild.result = 'FAILURE'
+                        return
+                    }
+                }
+            }
+        }
+
+        stage('Remove older images') {
+            steps {
+                script {
+                    try {
+                        sh "ssh user@host-ip-placeholder 'cd /path/to/project ; sudo docker rmi registry-url-placeholder/socketgateway -f '"
+                    } catch (Exception e) {
+                        sendBuildFailureEmail("Remove older images", e.getMessage())
+                        currentBuild.result = 'FAILURE'
+                        return
+                    }
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    try {
+                        sh "ssh user@host-ip-placeholder 'cd /path/to/project ; sudo docker compose up -d socketrealtimegateway'"
+                    } catch (Exception e) {
+                        sendBuildFailureEmail("Deploy", e.getMessage())
+                        currentBuild.result = 'FAILURE'
+                        return
+                    }
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+    }
+
+    post {
+        success {
+            sendBuildSuccessEmail()
+        }
+        failure {
+            sendBuildFailureEmail(null, "Build failed")
+        }
+    }
+}
+
+def sendBuildSuccessEmail() {
+    def subject = "Build Success: ${env.JOB_NAME} [${env.BUILD_NUMBER}]"
+    def body = "The build ${env.JOB_NAME} [${env.BUILD_NUMBER}] has succeeded."
+    sendEmail(subject, body)
+}
+
+def sendBuildFailureEmail(String stage, String message) {
+    def subject = "Build Failure: ${env.JOB_NAME} [${env.BUILD_NUMBER}]"
+    def body = """
+        The build ${env.JOB_NAME} [${env.BUILD_NUMBER}] has failed.
+        Stage: ${stage ?: "Unknown"}
+        Message: ${message}
+    """.trim()
+    sendEmail(subject, body)
+}
+
+def sendEmail(String subject, String body) {
+    emailext(
+        subject: subject,
+        body: body,
+        to: env.emailRecipients,
+        from: env.emailSender
+    )
+}
