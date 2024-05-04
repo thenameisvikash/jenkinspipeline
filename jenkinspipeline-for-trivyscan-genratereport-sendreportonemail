@@ -1,0 +1,141 @@
+pipeline {
+    agent any
+
+    environment {
+        imageName = "your-image-name"
+        registryCredentials = "nexus-credentials-placeholder"
+        registry = "registry-url-placeholder"
+        dockerImage = ''
+        version = ":latest"
+        EMAIL_RECIPIENT = "email-recipient-placeholder"
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Codefetch') {
+            steps {
+                git branch: 'dev-branch-placeholder', credentialsId: 'git-credentials-placeholder', url: 'git-repo-url-placeholder'
+            }
+        }
+
+        stage('Update Environment File') {
+            steps {
+                script {
+                    sh '''
+                        echo "REACT_APP_API_PORT=api-port-placeholder" > .env
+                        echo "REACT_APP_API_PORT=api-port-dlt-placeholder" >> .env
+                    '''
+                }
+            }
+        }
+
+        stage('Scan with Trivy') {
+            steps {
+                script {
+                    // Run Trivy scan and generate a report in the "table" format
+                    def trivyOutput = sh(script: 'trivy filesystem --format table .', returnStdout: true)
+
+                    // Write the Trivy report to an HTML file
+                    writeFile file: 'trivy-report.html', text: """
+                        <html>
+                            <head>
+                                <title>Trivy Report</title>
+                            </head>
+                            <body>
+                                <pre>$trivyOutput</pre>
+                            </body>
+                        </html>
+                    """
+
+                    // Publish the Trivy HTML report
+                    publishHTML(target: [
+                        allowMissing: true,
+                        alwaysLinkToLastBuild: false,
+                        keepAll: true,
+                        reportDir: ".",
+                        reportFiles: "trivy-report.html",
+                        reportName: "Trivy Report"
+                    ])
+
+                    // Check for any high or critical vulnerabilities
+                    def highVulns = trivyOutput.count("HIGH")
+                    def criticalVulns = trivyOutput.count("CRITICAL")
+                    if (highVulns > 0 || criticalVulns > 0) {
+                        error("High or critical vulnerabilities found in the Trivy scan.")
+                    }
+                }
+            }
+        }
+
+        stage('Building image') {
+            steps {
+                script {
+                    dockerImage = docker.build(imageName)
+                }
+            }
+        }
+
+        stage('Uploading to Nexus') {
+            steps {
+                script {
+                    docker.withRegistry('http://' + registry, registryCredentials) {
+                        dockerImage.push('latest')
+                    }
+                }
+            }
+        }
+
+        stage('Stop previous containers') {
+            steps {
+                script {
+                    sh "ssh user@host-ip-placeholder 'docker ps -f name=smartping -q | xargs --no-run-if-empty docker container stop'"
+                }
+            }
+        }
+
+        stage('Remove older containers') {
+            steps {
+                script {
+                    sh "ssh user@host-ip-placeholder 'docker container ls -a -f name=smartping -q | xargs -r docker container rm'"
+                }
+            }
+        }
+
+        stage('Remove older images') {
+            steps {
+                script {
+                    sh "ssh user@host-ip-placeholder 'cd /path/to/project ; sudo docker rmi registry-url-placeholder/smartping -f '"
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    sh "ssh user@host-ip-placeholder 'cd /path/to/project ; sudo docker compose up -d smartping'"
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                try {
+                    emailext attachmentsPattern: 'trivy-report.html',
+                            body: 'Please find the Trivy report attached.',
+                            ccList: 'cc-email-placeholder',
+                            subject: "Trivy Report - ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                            to: "${env.EMAIL_RECIPIENT}"
+                } catch (Exception e) {
+                    echo "Error sending email: $e"
+                }
+            }
+        }
+    }
+}
